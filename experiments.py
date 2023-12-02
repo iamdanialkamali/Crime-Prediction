@@ -206,8 +206,25 @@ if __name__ == '__main__':
     parser.add_argument('--best_params', type=int, default=0, help='Whether to do the parameter search')
     args = parser.parse_args()
 
+<<<<<<< HEAD
     X_train, y_train = get_dataset("data_for_classifier.csv", 0)
     X_val, y_val = get_dataset("data_for_classifier.csv", 1)
     X_test, y_test = get_dataset("data_for_classifier.csv", 2)
     # X_train, X_val, X_test, y_train, y_val, y_test = get_iris_dataset(test_size=0.2, val_size=0.25)
     pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args)
+=======
+    # X_train, y_train = get_dataset("data_for_classifier.csv", 0)
+    # X_val, y_val = get_dataset("data_for_classifier.csv", 1)
+    # X_test, y_test = get_dataset("data_for_classifier.csv", 2)
+    X_train, X_val, X_test, y_train, y_val, y_test = get_iris_dataset(test_size=0.2, val_size=0.25)
+
+
+    model = get_model(args)
+
+    if args.best_params:
+        model = perform_parameter_search(model, X_train, y_train)
+
+    train(model, X_train, y_train, X_val, y_val)
+    test_results = test(model, X_test, y_test)
+    print("Test results:", test_results)
+>>>>>>> 736989af284c26085563d6a2154f45ac66daf56e
