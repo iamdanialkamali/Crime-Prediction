@@ -21,7 +21,7 @@ from sklearn.decomposition import TruncatedSVD
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+np.random.seed(42)
 
 
 
@@ -72,16 +72,24 @@ def get_iris_dataset(test_size=0.2, val_size=0.25):
 def get_dataset(filename, split):
     y_column = "Primary Type"
     data_for_classifier = pd.read_csv(filename).dropna()
-    x_columns = list(set(data_for_classifier.columns) - set([y_column, "split"]))
+    x_columns = [x for x in data_for_classifier.columns if x in set(data_for_classifier.columns) - set([y_column, "split"])]
     data_for_classifier = data_for_classifier[data_for_classifier["split"] == split]
     return data_for_classifier[x_columns].to_numpy(), data_for_classifier[y_column].to_numpy()
 
-def train(clf, X_train, y_train, X_val, y_val,chunks=1):
+def train(clf, X_train, y_train, X_val, y_val,chunks=1,recency = False,gm=False):
     logging.info("Training the model...")
+
+    weights = None
+
+    if gm:
+        X_train,y_train = generate_data_for_imbalance(X_train,y_train)
+    if recency:
+        weights = get_sample_weights(X_train, y_train)
     if chunks != 1:
-        clf = ensemble_classifier(X_train, y_train, X_val, y_val,clf, num_subsets=chunks)
+        clf = ensemble_classifier(X_train, y_train, X_val, y_val,clf, num_subsets=chunks,sample_weights=weights)
     else:
-        clf.fit(X_train, y_train)
+        clf.fit(X_train, y_train,sample_weight=weights)
+    
     return (metrics(y_val, clf.predict(X_val)),metrics(y_train, clf.predict(X_train)))
 
 def metrics(y_val, y_pred):
@@ -193,8 +201,6 @@ def ensemble_classifier(X_train, y_train, X_test, y_test, clf ,num_subsets=10):
     ensemble_predictions = voting_clf.predict(X_test)
 
     print("Ensemble accuracy:", accuracy_score(y_test, ensemble_predictions))
-
-
     return voting_clf
 
 def feature_selection(X_train, X_val, X_test, y_train, y_val, y_test):
@@ -221,9 +227,47 @@ def pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args):
     if args.best_params:
         model = perform_parameter_search(model, X_train, y_train, X_val, y_val)
 
-    train(model, X_train, y_train, X_val, y_val)
+    train(model, X_train, y_train, X_val, y_val,args.chunks,args.recency,args.gm)
     test_results = test(model, X_test, y_test)
     print("Test results:", test_results)
+
+
+def get_sample_weights(X_train, y_train):
+    #2023 samples have more weight compared to 2022 samples
+    weights = np.ones(len(y_train))
+    for i,year in enumerate(range(2023,2019,-1)):
+        weights[X_train[:,1] <= year] = 1.0/(1+i)
+    return weights
+
+def generate_data_for_imbalance(X_train,y_train):
+    """
+    Assume all features are independent, and gaussian distributed
+    """
+    #fit gaussian distribution for each feature
+    mean = np.mean(X_train,axis=0)
+    std = np.std(X_train,axis=0)
+    #generate data for each class
+    
+    #unique class counts 
+    unq,unq_count = np.unique(y_train, return_counts=True)
+    generate_data = [int(x) for x in (1- unq_count/len(y_train))*len(y_train)*0.2]
+
+    X_train_new = []
+    y_train_new = []
+    for i,elem in enumerate(unq):
+        X_train_new.append(np.random.normal(mean,std,size=(generate_data[i],X_train.shape[1])))
+        y_train_new.append(np.ones(generate_data[i])*elem)
+    X_train_new = np.concatenate(X_train_new,axis=0)
+    y_train_new = np.concatenate(y_train_new,axis=0)
+
+
+    X_train_new,_,y_train_new,_= train_test_split(X_train_new,y_train_new,test_size=0.2)
+
+    return X_train_new,y_train_new
+
+
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a classifier')
@@ -240,6 +284,9 @@ if __name__ == '__main__':
                     help='Method for feature selection')
     parser.add_argument('--best_params', type=int, default=0, help='Whether to do the parameter search')
     parser.add_argument('--chunks', type=int, default=1, help='Number of chunks we need to shard the data')
+    parser.add_argument('--recency', type=bool, default=0, help='do we need to prioritize recent data')
+    parser.add_argument('--gm', type=bool, default=0, help='generative model for the data')
+
 
     args = parser.parse_args()
 
