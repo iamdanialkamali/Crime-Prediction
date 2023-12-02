@@ -68,8 +68,3 @@ if __name__ == '__main__':
 
     clf = RandomForestClassifier(n_estimators=100, max_depth=2,random_state=0)
     train(clf, X_train, y_train, X_val, y_val)
-
-
-
-
-
