@@ -119,13 +119,12 @@ def perform_parameter_search(clf, X_train, y_train,X_val, y_val):
     elif isinstance(clf, LogisticRegression):
         param_grid = {
             'C': [0.1, 1, 10],
-            'penalty': ['l2']
+            'penalty': ['l1','l2']
         }
     elif isinstance(clf, MLPClassifier):
         param_grid = {
-            
             'hidden_layer_sizes': [(50,), (100,)],
-            'activation': ['tanh', 'relu']
+            'activation': ['relu']
         }
 
     if param_grid:
