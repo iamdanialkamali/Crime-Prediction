@@ -119,6 +119,7 @@ def perform_parameter_search(clf, X_train, y_train):
         }
     elif isinstance(clf, MLPClassifier):
         param_grid = {
+            
             'hidden_layer_sizes': [(50,), (100,)],
             'activation': ['tanh', 'relu']
         }
@@ -134,7 +135,7 @@ def perform_parameter_search(clf, X_train, y_train):
         return clf
 
 
-def get_model(args):
+def get_model(args,classes):
     clf_name = args.classifier
     params = get_params_from_args(args)
 
@@ -146,11 +147,10 @@ def get_model(args):
     elif clf_name == 'logistic_regression':
         clf = LogisticRegression(max_iter=10000,**params)
     elif clf_name == 'kmeans':
+        clf = KMeans(n_clusters=classes)
         if params.get('mode') == 'spectral':
             transformer = Nystroem()
-            clf = make_pipeline(transformer, KMeans(**params))
-        else:
-            clf = KMeans(**params)
+            clf = make_pipeline(transformer, clf)
     elif clf_name == 'mlp':
         clf = MLPClassifier(**params)
     else:
@@ -178,11 +178,12 @@ def feature_selection(X_train, X_val, X_test, y_train, y_val, y_test):
     return X_train, X_val, X_test, y_train, y_val, y_test
 
 def pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args):
-    model = get_model(args)
     
     if args.feature_selection:
         X_train, X_val, X_test, y_train, y_val, y_test = feature_selection(X_train, X_val, X_test, y_train, y_val, y_test)
     
+    model = get_model(args, classes=len(np.unique(y_train)))
+
     if args.best_params:
         model = perform_parameter_search(model, X_train, y_train)
 
@@ -212,12 +213,3 @@ if __name__ == '__main__':
     # X_train, X_val, X_test, y_train, y_val, y_test = get_iris_dataset(test_size=0.2, val_size=0.25)
     pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args)
 
-
-    model = get_model(args)
-
-    if args.best_params:
-        model = perform_parameter_search(model, X_train, y_train)
-
-    train(model, X_train, y_train, X_val, y_val)
-    test_results = test(model, X_test, y_test)
-    print("Test results:", test_results)
