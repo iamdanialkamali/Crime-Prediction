@@ -170,7 +170,7 @@ if __name__ == "__main__":
         data_for_classifier[text_columns].apply(bert_encode)
         pca = PCA(n_components=4)
         pca.fit(np.array(list(bert_cache.values())))
-        data_for_classifier[text_columns] = data_for_classifier[text_columns].apply(lambda x:text_to_2d(x,pca))
+        data_for_classifier[text_columns].apply(lambda x:text_to_2d(x,pca))
         for i in range(4):
             data_for_classifier[f"{text_columns}_{i}"] = data_for_classifier[text_columns].apply(lambda x:x[i])
 
