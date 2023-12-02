@@ -14,9 +14,39 @@ from sklearn.kernel_approximation import Nystroem  # For Spectral K-Means
 import sklearn.model_selection
 from sklearn.experimental import enable_halving_search_cv
 from sklearn.model_selection import HalvingGridSearchCV
+from sklearn.feature_selection import SelectFromModel, SelectKBest, f_classif
+from sklearn.decomposition import TruncatedSVD
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+
+
+def feature_selection_fsf(X_train, y_train, k=10):
+    fsf = SelectKBest(score_func=f_classif, k=k)
+    return fsf.fit_transform(X_train, y_train), fsf
+
+def feature_selection_lr(X_train, y_train, threshold=0.01):
+    class FeatureSelector:
+        def __init__(self, selected_features_indices) -> None:
+            self.selected_features_indices = selected_features_indices
+        def transform(self, x):
+            return x[:, self.selected_features_indices]
+
+
+    lr = LogisticRegression(max_iter=10000,penalty='l2', C=1.0)
+    lr.fit(X_train, y_train)
+    coefficients = lr.coef_
+    selected_features_indices = np.where(np.abs(coefficients) > threshold)
+    print(selected_features_indices)
+    X_train_selected = X_train[:, selected_features_indices]
+
+    return X_train_selected, FeatureSelector(selected_features_indices)
+
+def feature_selection_svd(X_train, n_components=10):
+    svd = TruncatedSVD(n_components=min(n_components,X_train.shape[-1]))
+    return svd.fit_transform(X_train), svd
 
 
 def get_iris_dataset(test_size=0.2, val_size=0.25):
@@ -39,14 +69,13 @@ def get_iris_dataset(test_size=0.2, val_size=0.25):
 
 def get_dataset(filename, split):
     y_column = "Primary Type"
-    data_for_classifier = pd.read_csv(filename)
+    data_for_classifier = pd.read_csv(filename).dropna()
     x_columns = list(set(data_for_classifier.columns) - set([y_column, "split"]))
     data_for_classifier = data_for_classifier[data_for_classifier["split"] == split]
     return data_for_classifier[x_columns].to_numpy(), data_for_classifier[y_column].to_numpy()
 
 def train(clf, X_train, y_train, X_val, y_val):
     logging.info("Training the model...")
-    clf = make_pipeline(StandardScaler(), clf)
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_val)
 
@@ -95,8 +124,10 @@ def perform_parameter_search(clf, X_train, y_train):
         }
 
     if param_grid:
+        logging.info("Searching different paramaters for the classifier")
         grid_search = HalvingGridSearchCV(clf, param_grid, cv=5, factor=2, scoring='accuracy')
         grid_search.fit(X_train, y_train)
+        logging.info(f"Best params {grid_search.best_params_}")
         return grid_search.best_estimator_
     else:
         logging.warn("Parameter search for this model is not implemented! Actual model returned.")
@@ -113,7 +144,7 @@ def get_model(args):
     elif clf_name == 'svm':
         clf = SVC(**params)
     elif clf_name == 'logistic_regression':
-        clf = LogisticRegression(**params)
+        clf = LogisticRegression(max_iter=10000,**params)
     elif clf_name == 'kmeans':
         if params.get('mode') == 'spectral':
             transformer = Nystroem()
@@ -129,9 +160,35 @@ def get_model(args):
 
 def test(clf, X_test, y_test):
     logging.info("Testing the model...")
-    print(clf)
     y_pred = clf.predict(X_test)
     return metrics(y_test, y_pred)
+
+def feature_selection(X_train, X_val, X_test, y_train, y_val, y_test):
+    logging.info("Selecting features....")
+
+    if args.feature_selection == 'FSF':
+        X_train, selector = feature_selection_fsf(X_train, y_train, min(10, X_train.shape[-1] - 1))
+    elif args.feature_selection == 'LR':
+        X_train, selector = feature_selection_lr(X_train, y_train)
+    elif args.feature_selection == 'SVD':
+        X_train, selector = feature_selection_svd(X_train)
+
+    X_val = selector.transform(X_val)
+    X_test = selector.transform(X_test)
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+def pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args):
+    model = get_model(args)
+    
+    if args.feature_selection:
+        X_train, X_val, X_test, y_train, y_val, y_test = feature_selection(X_train, X_val, X_test, y_train, y_val, y_test)
+    
+    if args.best_params:
+        model = perform_parameter_search(model, X_train, y_train)
+
+    train(model, X_train, y_train, X_val, y_val)
+    test_results = test(model, X_test, y_test)
+    print("Test results:", test_results)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a classifier')
@@ -144,20 +201,13 @@ if __name__ == '__main__':
                         help='Kernel type for SVM')
     parser.add_argument('--kmeans_mode', type=str, default='normal', choices=['normal', 'spectral'],
                         help='Mode for K-Means clustering')
+    parser.add_argument('--feature_selection', type=str, default=None, choices=[None, 'FSF', 'LR', 'SVD'],
+                    help='Method for feature selection')
     parser.add_argument('--best_params', type=int, default=0, help='Whether to do the parameter search')
     args = parser.parse_args()
 
-    # X_train, y_train = get_dataset("data_for_classifier.csv", 0)
-    # X_val, y_val = get_dataset("data_for_classifier.csv", 1)
-    # X_test, y_test = get_dataset("data_for_classifier.csv", 2)
-    X_train, X_val, X_test, y_train, y_val, y_test = get_iris_dataset(test_size=0.2, val_size=0.25)
-
-
-    model = get_model(args)
-
-    if args.best_params:
-        model = perform_parameter_search(model, X_train, y_train)
-
-    train(model, X_train, y_train, X_val, y_val)
-    test_results = test(model, X_test, y_test)
-    print("Test results:", test_results)
+    X_train, y_train = get_dataset("data_for_classifier.csv", 0)
+    X_val, y_val = get_dataset("data_for_classifier.csv", 1)
+    X_test, y_test = get_dataset("data_for_classifier.csv", 2)
+    # X_train, X_val, X_test, y_train, y_val, y_test = get_iris_dataset(test_size=0.2, val_size=0.25)
+    pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args)
