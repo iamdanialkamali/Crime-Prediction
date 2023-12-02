@@ -73,7 +73,7 @@ def bert_encode(text):
     return embeddings
 
 def text_to_2d(text,pca):
-    return pca.transform(bert_encode(text).reshape(1, -1))[0]
+    return pca.transform(bert_encode(text).reshape(1, -1))
 
 
 class CSVDataset(Dataset):
@@ -154,8 +154,6 @@ if __name__ == "__main__":
 
     data_for_classifier = crime_data
 
-
-
     categorical_features = ["Block","Police Districts","District","Zip Codes",'Census Tracts', 'Wards','Ward', 'Community Areas']
     for categorical_feature in tqdm(categorical_features):
         embedder = get_embedder(data_for_classifier[data_for_classifier["split"] == 0], categorical_feature, epochs=3)
@@ -170,9 +168,9 @@ if __name__ == "__main__":
         data_for_classifier[text_columns].apply(bert_encode)
         pca = PCA(n_components=4)
         pca.fit(np.array(list(bert_cache.values())))
-        data_for_classifier[text_columns].apply(lambda x:text_to_2d(x,pca))
+        data_for_classifier[text_columns] = data_for_classifier[text_columns].apply(lambda x:text_to_2d(x,pca))
         for i in range(4):
-            data_for_classifier[f"{text_columns}_{i}"] = data_for_classifier[text_columns].apply(lambda x:x[i])
+            data_for_classifier[f"{text_columns}_{i}"] = data_for_classifier[text_columns].apply(lambda x: x[i])
 
         data_for_classifier = data_for_classifier.drop(text_columns, axis=1)
         bert_cache = {}
@@ -182,6 +180,3 @@ if __name__ == "__main__":
 
 
 
-
-
-    
