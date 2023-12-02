@@ -161,4 +161,3 @@ if __name__ == '__main__':
     train(model, X_train, y_train, X_val, y_val)
     test_results = test(model, X_test, y_test)
     print("Test results:", test_results)
->>>>>>> 760475466b633815509f5d173fd123765070059d
