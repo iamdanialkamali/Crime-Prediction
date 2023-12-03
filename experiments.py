@@ -3,7 +3,7 @@ import numpy as np
 import argparse
 import logging
 from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, VotingClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression,SGDClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.cluster import KMeans
 from sklearn.svm import SVC
@@ -18,10 +18,15 @@ from scipy import sparse
 import math
 from sklearn.feature_selection import SelectFromModel, SelectKBest, f_classif
 from sklearn.decomposition import TruncatedSVD
-
+import time
+import lightgbm as lgb
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.over_sampling import RandomOverSampler
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 np.random.seed(42)
+
+
 
 
 
@@ -76,20 +81,28 @@ def get_dataset(filename, split):
     data_for_classifier = data_for_classifier[data_for_classifier["split"] == split]
     return data_for_classifier[x_columns].to_numpy(), data_for_classifier[y_column].to_numpy()
 
-def train(clf, X_train, y_train, X_val, y_val,chunks=1,recency = False,gm=False):
+def train(clf, X_train, y_train, X_val, y_val,chunks=1,recency = False,sampling="gm"):
     logging.info("Training the model...")
 
     weights = None
 
-    if gm:
+    if sampling == "":
         X_train,y_train = generate_data_for_imbalance(X_train,y_train)
+    elif sampling == "over":
+        X_train,y_train = RandomOverSampler().fit_resample(X_train,y_train)
+    elif sampling == "under":
+        X_train,y_train = RandomUnderSampler().fit_resample(X_train,y_train)
     if recency:
         weights = get_sample_weights(X_train, y_train)
     if chunks != 1:
         clf = ensemble_classifier(X_train, y_train, X_val, y_val,clf, num_subsets=chunks,sample_weights=weights)
     else:
-        clf.fit(X_train, y_train,sample_weight=weights)
+        if isinstance(clf, MLPClassifier):
+            clf.fit(X_train, y_train)
+        else:
+            clf.fit(X_train, y_train,sample_weight=weights)
     
+    logging.info("Training complete, classifer is %s", clf)
     return (metrics(y_val, clf.predict(X_val)),metrics(y_train, clf.predict(X_train)))
 
 def metrics(y_val, y_pred):
@@ -118,6 +131,12 @@ def perform_parameter_search(clf, X_train, y_train,X_val, y_val):
             'max_depth': [3, 5, 10],
             'min_samples_split': [2, 5, 10]
         }
+    elif isinstance(clf, lgb.LGBMClassifier):
+        param_grid = {
+            'num_leaves': [31, 50, 100],
+            'learning_rate': [0.01, 0.1, 1],
+            'n_estimators': [20, 40, 100]
+        }
     
     elif isinstance(clf, SVC):
         param_grid = {
@@ -132,9 +151,8 @@ def perform_parameter_search(clf, X_train, y_train,X_val, y_val):
     elif isinstance(clf, MLPClassifier):
         param_grid = {
             'hidden_layer_sizes': [(50,), (100,)],
-            'activation': ['relu']
+            'alpha': [0.0001, 0.001, 0.01]
         }
-
     if param_grid:
         X = sparse.vstack((X_train, X_val))
         y = np.concatenate([y_train, y_val])
@@ -153,17 +171,22 @@ def get_model(args,classes):
 
     if clf_name == 'random_forest':
         clf = RandomForestClassifier(**params)
+    elif clf_name == 'lbgm':
+        clf = lgb.LGBMClassifier(num_leaves = 100, learning_rate=0.01,**params)
     elif clf_name == 'svm':
-        clf = SVC(**params)
+        if "kernel" in params and params["kernel"] == 'linear':
+            clf = SGDClassifier(max_iter=5000, loss='hinge', **params) #
+        else:
+            clf = SVC(**params)
     elif clf_name == 'logistic_regression':
-        clf = LogisticRegression(max_iter=10000,**params)
+        clf = SGDClassifier(max_iter=5000, **params) #LogisticRegression(max_iter=10000,**params)
     elif clf_name == 'kmeans':
         clf = KMeans(n_clusters=classes)
         if params.get('mode') == 'spectral':
             transformer = Nystroem()
             clf = make_pipeline(transformer, clf)
     elif clf_name == 'mlp':
-        clf = MLPClassifier(**params)
+        clf = MLPClassifier(alpha=0.001,**params)
     else:
         raise ValueError("Invalid classifier name")
     return clf
@@ -175,7 +198,7 @@ def test(clf, X_test, y_test):
     return metrics(y_test, y_pred)
 
 
-def ensemble_classifier(X_train, y_train, X_test, y_test, clf ,num_subsets=10):
+def ensemble_classifier(X_train, y_train, X_test, y_test, clf ,num_subsets=10,sample_weights=None):
     classifiers = []
     weights = []
     start = 0
@@ -183,16 +206,16 @@ def ensemble_classifier(X_train, y_train, X_test, y_test, clf ,num_subsets=10):
 
     for i in range(num_subsets):
         subset_X,  subset_y, = X_train[start:start+each_chunk], y_train[start:start+each_chunk]
-        start += each_chunk
-        clf.fit(subset_X, subset_y)
+        if sample_weights is not None and not isinstance(clf, MLPClassifier):
+            clf.fit(subset_X, subset_y,sample_weight=sample_weights[start:start+each_chunk])
+        else:
+            clf.fit(subset_X, subset_y)
         pred1 = clf.predict(X_test)
+        start += each_chunk
         
-
-    if args.best_params:
-        model = perform_parameter_search(model, X_train, y_train)
-        acc = accuracy_score(y_test, pred1)
-        classifiers.extend([(f'rf_{i}', clf)])
-        weights.extend([0.5*math.log((acc)/(1-acc))])
+    acc = accuracy_score(y_test, pred1)
+    classifiers.extend([(f'rf_{i}', clf)])
+    weights.extend([0.5*math.log((acc)/(1-acc))])
     
     weights = [x / sum(weights) for x in weights]
     voting_clf = VotingClassifier(estimators=classifiers, voting='soft', weights=weights)
@@ -224,12 +247,22 @@ def pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args):
     
     model = get_model(args, classes=len(np.unique(y_train)))
 
-    if args.best_params:
-        model = perform_parameter_search(model, X_train, y_train, X_val, y_val)
 
-    train(model, X_train, y_train, X_val, y_val,args.chunks,args.recency,args.gm)
+    if args.best_params:
+        time_start = time.time()
+        model = perform_parameter_search(model, X_train, y_train, X_val, y_val)
+        logging.info("Parameter search took %s seconds", time.time() - time_start)
+    
+    time_start = time.time()
+    val_results,train_results = train(model, X_train, y_train, X_val, y_val,args.chunks,args.recency,args.sampling)
+    logging.info("Training took %s seconds", time.time() - time_start)
+    logging.info("Validation results: %s", val_results)
+    logging.info("Train results: %s", train_results)
+
+    time_start = time.time()
     test_results = test(model, X_test, y_test)
-    print("Test results:", test_results)
+    logging.info("Testing took %s seconds", time.time() - time_start)
+    logging.info("Test results: %s", test_results)
 
 
 def get_sample_weights(X_train, y_train):
@@ -250,18 +283,20 @@ def generate_data_for_imbalance(X_train,y_train):
     
     #unique class counts 
     unq,unq_count = np.unique(y_train, return_counts=True)
-    generate_data = [int(x) for x in (1- unq_count/len(y_train))*len(y_train)*0.2]
+    generate_data = [int(x) for x in (1- unq_count/len(y_train))*len(y_train)*0.1]
 
     X_train_new = []
     y_train_new = []
     for i,elem in enumerate(unq):
         X_train_new.append(np.random.normal(mean,std,size=(generate_data[i],X_train.shape[1])))
         y_train_new.append(np.ones(generate_data[i])*elem)
+    
     X_train_new = np.concatenate(X_train_new,axis=0)
     y_train_new = np.concatenate(y_train_new,axis=0)
 
 
-    X_train_new,_,y_train_new,_= train_test_split(X_train_new,y_train_new,test_size=0.2)
+    train_size =  X_train.shape[0] / X_train_new.shape[0]
+    X_train_new,_,y_train_new,_= train_test_split(X_train_new,y_train_new,train_size=train_size)
 
     return X_train_new,y_train_new
 
@@ -272,7 +307,7 @@ def generate_data_for_imbalance(X_train,y_train):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a classifier')
     parser.add_argument('--classifier', type=str, required=True, 
-                        choices=['random_forest', 'svm', 'logistic_regression', 'kmeans', 'mlp'],
+                        choices=['random_forest','lbgm', 'svm', 'logistic_regression', 'kmeans', 'mlp'],
                         help='The type of classifier to use')
     parser.add_argument('--penalty', type=str, default='none', choices=['none','l1', 'l2'],
                         help='The norm used in penalization for Logistic Regression')
@@ -285,7 +320,7 @@ if __name__ == '__main__':
     parser.add_argument('--best_params', type=int, default=0, help='Whether to do the parameter search')
     parser.add_argument('--chunks', type=int, default=1, help='Number of chunks we need to shard the data')
     parser.add_argument('--recency', type=bool, default=0, help='do we need to prioritize recent data')
-    parser.add_argument('--gm', type=bool, default=0, help='generative model for the data')
+    parser.add_argument('--sampling', type=str, default=None,choices=["over","under","gm"], help='do we need to prioritize recent data')
 
 
     args = parser.parse_args()
