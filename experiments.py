@@ -16,12 +16,13 @@ from sklearn.experimental import enable_halving_search_cv
 from sklearn.model_selection import HalvingGridSearchCV,train_test_split
 from scipy import sparse
 import math
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.feature_selection import SelectFromModel, SelectKBest, f_classif
 from sklearn.decomposition import TruncatedSVD
 import time
-import lightgbm as lgb
 from imblearn.under_sampling import RandomUnderSampler
 from imblearn.over_sampling import RandomOverSampler
+from mlp import PyTorchMLP
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 np.random.seed(42)
@@ -97,7 +98,7 @@ def train(clf, X_train, y_train, X_val, y_val,chunks=1,recency = False,sampling=
     if chunks != 1:
         clf = ensemble_classifier(X_train, y_train, X_val, y_val,clf, num_subsets=chunks,sample_weights=weights)
     else:
-        if isinstance(clf, MLPClassifier):
+        if isinstance(clf, (MLPClassifier,KNeighborsClassifier)):
             clf.fit(X_train, y_train)
         else:
             clf.fit(X_train, y_train,sample_weight=weights)
@@ -131,13 +132,6 @@ def perform_parameter_search(clf, X_train, y_train,X_val, y_val):
             'max_depth': [3, 5, 10],
             'min_samples_split': [2, 5, 10]
         }
-    elif isinstance(clf, lgb.LGBMClassifier):
-        param_grid = {
-            'num_leaves': [31, 50, 100],
-            'learning_rate': [0.01, 0.1, 1],
-            'n_estimators': [20, 40, 100]
-        }
-    
     elif isinstance(clf, SVC):
         param_grid = {
             'C': [0.1, 1, 10],
@@ -153,6 +147,16 @@ def perform_parameter_search(clf, X_train, y_train,X_val, y_val):
             'hidden_layer_sizes': [(50,), (100,)],
             'alpha': [0.0001, 0.001, 0.01]
         }
+    else: 
+        import lightgbm as lgb
+        if isinstance(clf, lgb.LGBMClassifier):
+            param_grid = {
+                'num_leaves': [31, 50, 100],
+                'learning_rate': [0.01, 0.1, 1],
+                'n_estimators': [20, 40, 100]
+            }
+        
+
     if param_grid:
         X = sparse.vstack((X_train, X_val))
         y = np.concatenate([y_train, y_val])
@@ -165,28 +169,32 @@ def perform_parameter_search(clf, X_train, y_train,X_val, y_val):
         return clf
 
 
-def get_model(args,classes):
+def get_model(args,classes,num_features):
     clf_name = args.classifier
     params = get_params_from_args(args)
 
     if clf_name == 'random_forest':
-        clf = RandomForestClassifier(**params)
+        clf = RandomForestClassifier(**params,verbose=args.verbose)
     elif clf_name == 'lbgm':
+        import lightgbm as lgb
         clf = lgb.LGBMClassifier(num_leaves = 100, learning_rate=0.01,**params)
     elif clf_name == 'svm':
         if "kernel" in params and params["kernel"] == 'linear':
-            clf = SGDClassifier(max_iter=5000, loss='hinge', **params) #
+            clf = SGDClassifier(max_iter=5_000_000, loss='hinge',verbose=args.verbose,n_jobs=-1) #
         else:
             clf = SVC(**params)
     elif clf_name == 'logistic_regression':
-        clf = SGDClassifier(max_iter=5000, **params) #LogisticRegression(max_iter=10000,**params)
+        clf = SGDClassifier(max_iter=5_000_000,verbose=args.verbose,n_jobs=-1) #LogisticRegression(max_iter=10000,**params)
     elif clf_name == 'kmeans':
         clf = KMeans(n_clusters=classes)
         if params.get('mode') == 'spectral':
             transformer = Nystroem()
             clf = make_pipeline(transformer, clf)
+    elif clf_name == "knn":
+        clf = KNeighborsClassifier(n_neighbors=classes)
+    
     elif clf_name == 'mlp':
-        clf = MLPClassifier(alpha=0.001,**params)
+        clf = PyTorchMLP(**params,num_features=num_features,num_labels=classes) #MLPClassifier(alpha=0.001,**params,verbose=args.verbose)
     else:
         raise ValueError("Invalid classifier name")
     return clf
@@ -245,7 +253,7 @@ def pipeline(X_train, X_val, X_test, y_train, y_val, y_test, args):
     if args.feature_selection:
         X_train, X_val, X_test, y_train, y_val, y_test = feature_selection(X_train, X_val, X_test, y_train, y_val, y_test)
     
-    model = get_model(args, classes=len(np.unique(y_train)))
+    model = get_model(args, classes=len(np.unique(y_train)), num_features = X_train.shape[-1])
 
 
     if args.best_params:
@@ -307,7 +315,7 @@ def generate_data_for_imbalance(X_train,y_train):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a classifier')
     parser.add_argument('--classifier', type=str, required=True, 
-                        choices=['random_forest','lbgm', 'svm', 'logistic_regression', 'kmeans', 'mlp'],
+                        choices=['random_forest','lbgm', 'svm', 'logistic_regression', 'kmeans', 'mlp', 'knn'],
                         help='The type of classifier to use')
     parser.add_argument('--penalty', type=str, default='none', choices=['none','l1', 'l2'],
                         help='The norm used in penalization for Logistic Regression')
@@ -315,6 +323,10 @@ if __name__ == '__main__':
                         help='Kernel type for SVM')
     parser.add_argument('--kmeans_mode', type=str, default='normal', choices=['normal', 'spectral'],
                         help='Mode for K-Means clustering')
+    parser.add_argument('--verbose', type=bool, default=0, choices=[0, 1],
+                        help='Logging level')
+    
+    
     parser.add_argument('--feature_selection', type=str, default=None, choices=[None, 'FSF', 'LR', 'SVD'],
                     help='Method for feature selection')
     parser.add_argument('--best_params', type=int, default=0, help='Whether to do the parameter search')
