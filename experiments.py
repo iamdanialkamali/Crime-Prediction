@@ -23,6 +23,7 @@ import time
 from imblearn.under_sampling import RandomUnderSampler
 from imblearn.over_sampling import RandomOverSampler
 from mlp import PyTorchMLP
+from sklearn import preprocessing
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 np.random.seed(42)
@@ -47,14 +48,31 @@ def feature_selection_lr(X_train, y_train, threshold=0.01):
     lr.fit(X_train, y_train)
     coefficients = lr.coef_
     selected_features_indices = np.where(np.abs(coefficients) > threshold)
-    print(selected_features_indices)
     X_train_selected = X_train[:, selected_features_indices]
 
     return X_train_selected, FeatureSelector(selected_features_indices)
 
 def feature_selection_svd(X_train, n_components=10):
-    svd = TruncatedSVD(n_components=min(n_components,X_train.shape[-1]))
-    return svd.fit_transform(X_train), svd
+    svd = TruncatedSVD(n_components=min(X_train.shape) - 1)
+
+    # Step 4: Fit and transform
+    svd.fit(X_train)
+
+    # Step 5 & 6: Calculate explained variance and find optimal number of components
+    n_components = 0
+    comp_sum = 0
+    print(svd.explained_variance_ratio_)
+    for comp in svd.explained_variance_ratio_:
+        n_components += 1
+        comp_sum += comp
+        if comp_sum >= 0.99:
+            break
+    
+    logging.info(f"n_components :{n_components}")
+    # Step 7: Refit with optimal number of components
+    svd_optimal = TruncatedSVD(n_components=n_components)
+    svd_optimal.fit(X_train)
+    return svd_optimal.fit_transform(X_train), svd_optimal
 
 
 def get_iris_dataset(test_size=0.2, val_size=0.25):
@@ -78,7 +96,7 @@ def get_iris_dataset(test_size=0.2, val_size=0.25):
 def get_dataset(filename, split):
     y_column = "Primary Type"
     data_for_classifier = pd.read_csv(filename).dropna()
-    x_columns = [x for x in data_for_classifier.columns if x in set(data_for_classifier.columns) - set([y_column, "split"])]
+    x_columns = [x for x in data_for_classifier.columns if x in set(data_for_classifier.columns) - set([y_column, "split", "Year"])]
     data_for_classifier = data_for_classifier[data_for_classifier["split"] == split]
     return data_for_classifier[x_columns].to_numpy(), data_for_classifier[y_column].to_numpy()
 
@@ -98,12 +116,14 @@ def train(clf, X_train, y_train, X_val, y_val,chunks=1,recency = False,sampling=
     if chunks != 1:
         clf = ensemble_classifier(X_train, y_train, X_val, y_val,clf, num_subsets=chunks,sample_weights=weights)
     else:
-        if isinstance(clf, (MLPClassifier,KNeighborsClassifier)):
+        if isinstance(clf, PyTorchMLP):        
+            clf.fit(X_train, y_train, X_val, y_val)
+        elif isinstance(clf, (KNeighborsClassifier, MLPClassifier)):
             clf.fit(X_train, y_train)
         else:
-            clf.fit(X_train, y_train,sample_weight=weights)
-    
+            clf.fit(X_train, y_train, sample_weight=weights)
     logging.info("Training complete, classifer is %s", clf)
+
     return (metrics(y_val, clf.predict(X_val)),metrics(y_train, clf.predict(X_train)))
 
 def metrics(y_val, y_pred):
@@ -174,7 +194,7 @@ def get_model(args,classes,num_features):
     params = get_params_from_args(args)
 
     if clf_name == 'random_forest':
-        clf = RandomForestClassifier(**params,verbose=args.verbose)
+        clf = RandomForestClassifier(**params,verbose=args.verbose,n_jobs=-1)
     elif clf_name == 'lbgm':
         import lightgbm as lgb
         clf = lgb.LGBMClassifier(num_leaves = 100, learning_rate=0.01,**params)
@@ -184,17 +204,21 @@ def get_model(args,classes,num_features):
         else:
             clf = SVC(**params)
     elif clf_name == 'logistic_regression':
-        clf = SGDClassifier(max_iter=5_000_000,verbose=args.verbose,n_jobs=-1) #LogisticRegression(max_iter=10000,**params)
+        # clf = SGDClassifier(max_iter=5_000_000,verbose=args.verbose,n_jobs=-1) #LogisticRegression(max_iter=10000,**params)
+        clf = LogisticRegression(max_iter=500_000,verbose=args.verbose,n_jobs=-1,penalty='none') #LogisticRegression(max_iter=10000,**params)
     elif clf_name == 'kmeans':
         clf = KMeans(n_clusters=classes)
         if params.get('mode') == 'spectral':
             transformer = Nystroem()
             clf = make_pipeline(transformer, clf)
     elif clf_name == "knn":
-        clf = KNeighborsClassifier(n_neighbors=classes)
+        clf = KNeighborsClassifier(n_neighbors=100)
     
-    elif clf_name == 'mlp':
+    elif clf_name == 'mlp_pytorch':
         clf = PyTorchMLP(**params,num_features=num_features,num_labels=classes) #MLPClassifier(alpha=0.001,**params,verbose=args.verbose)
+    elif clf_name == 'mlp':
+        clf = MLPClassifier(**params,early_stopping=True) #MLPClassifier(alpha=0.001,**params,verbose=args.verbose)
+    
     else:
         raise ValueError("Invalid classifier name")
     return clf
@@ -315,7 +339,7 @@ def generate_data_for_imbalance(X_train,y_train):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a classifier')
     parser.add_argument('--classifier', type=str, required=True, 
-                        choices=['random_forest','lbgm', 'svm', 'logistic_regression', 'kmeans', 'mlp', 'knn'],
+                        choices=['random_forest','lbgm', 'svm', 'logistic_regression', 'kmeans', 'mlp', 'knn',"mlp_pytorch"],
                         help='The type of classifier to use')
     parser.add_argument('--penalty', type=str, default='none', choices=['none','l1', 'l2'],
                         help='The norm used in penalization for Logistic Regression')
